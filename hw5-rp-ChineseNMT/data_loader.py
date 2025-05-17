@@ -35,7 +35,7 @@ class Batch:
         self.tgt_text = tgt_text
 
         self.src = src.to(DEVICE)
-        self.src_key_padding_mask = (src == pad)  # shape: [batch_size, src_len]
+        self.src_key_padding_mask = (src == pad).to(DEVICE)  # shape: [batch_size, src_len]
 
         if tgt is not None:
             tgt = tgt.to(DEVICE)

@@ -5,6 +5,7 @@ from data_loader import MTDataset
 from torch.utils.data import DataLoader
 import torch
 from model import TransformerModel
+from train import train, test
 
 def run():
     utils.set_logger(config.log_path)
@@ -32,7 +33,7 @@ def run():
                        config.num_encoder_layers,
                        config.num_decoder_layers,
                        config.dim_feedforward,
-                       config.dropout)
+                       config.dropout).to(config.device)
     criterion = torch.nn.CrossEntropyLoss(ignore_index = 0, reduction = 'sum')
     optimizer = torch.optim.AdamW(model.parameters(), lr = config.lr, weight_decay = config.weight_decay)
     train(train_dataloader, dev_dataloader, model, criterion, optimizer)

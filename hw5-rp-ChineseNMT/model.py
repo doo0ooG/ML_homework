@@ -28,7 +28,8 @@ class TransformerModel(nn.Module):
                                           num_encoder_layers = num_encoder_layers,
                                           num_decoder_layers = num_decoder_layers,
                                           dim_feedforward = dim_feedforward,
-                                          dropout = dropout)
+                                          dropout = dropout,
+                                          batch_first= True)
         
         self.generator = nn.Linear(d_model, tgt_vocab_size)
 
