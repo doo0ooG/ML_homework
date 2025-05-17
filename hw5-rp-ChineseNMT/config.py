@@ -32,3 +32,6 @@ early_stop = 5
 lr = 3e-4
 weight_decay = 1e-4
 max_len = 60
+
+# 硬件妥协
+compute_bleu_data_ratio = 0.1
