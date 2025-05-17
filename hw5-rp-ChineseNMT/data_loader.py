@@ -14,61 +14,36 @@ class Batch:
     @staticmethod
     def subsequent_mask(size):
         """
-        生成用于遮蔽未来词的矩阵 (1, size, size)。
-        - 主对角线以下为True（当前及之前位置可见）
-        - 主对角线上为False（未来位置不可见）
-        
-        Args:
-            size (int): 序列长度
-        
-        Returns:
-            torch.Tensor: subsequent mask
+        生成下三角 mask: (size, size)
         """
-        attn_shape = (1, size, size)
-        mask = torch.tril(torch.ones(attn_shape, dtype=torch.bool))
-        return mask
+        return torch.tril(torch.ones((size, size), dtype=torch.bool))
 
     @staticmethod
-    def make_std_mask(tgt, pad):
+    def make_tgt_mask(tgt, pad):
         """
-        构建Decoder输入的标准mask，综合遮掉padding位置和未来词。
-        
-        Args:
-            tgt (torch.Tensor): 目标输入序列 (batch_size, seq_len)
-            pad (int): Padding token的id
-        
-        Returns:
-            torch.Tensor: 目标mask (batch_size, 1, seq_len) & (1, seq_len, seq_len)
+        返回：
+        - tgt_key_padding_mask: [batch_size, tgt_len]
+        - tgt_mask: [tgt_len, tgt_len]
         """
-        # 标记出非pad的位置
-        tgt_mask = (tgt != pad).unsqueeze(1)
-        # 叠加遮蔽未来词
-        tgt_mask = tgt_mask & Batch.subsequent_mask(tgt.size(1)).to(tgt_mask.device)
-        return tgt_mask
+        tgt_key_padding_mask = (tgt == pad)  # True 表示被 mask 掉
+        tgt_len = tgt.size(1)
+        tgt_mask = Batch.subsequent_mask(tgt_len).to(tgt.device)  # [tgt_len, tgt_len]
+        return tgt_key_padding_mask, tgt_mask
 
     def __init__(self, src_text, tgt_text, src, tgt=None, pad=0):
-        """
-        初始化Batch，封装源序列、目标序列及相关mask。
-
-        Args:
-            src_text (List[str]): 源语言文本（原始句子）
-            tgt_text (List[str]): 目标语言文本（原始句子）
-            src (torch.Tensor): 源语言token id序列
-            tgt (torch.Tensor, optional): 目标语言token id序列
-            pad (int): Padding token id
-        """
         self.src_text = src_text
         self.tgt_text = tgt_text
 
         self.src = src.to(DEVICE)
-        self.src_mask = (src != pad).unsqueeze(-2)  # (batch_size, 1, src_len)
+        self.src_key_padding_mask = (src == pad)  # shape: [batch_size, src_len]
 
         if tgt is not None:
             tgt = tgt.to(DEVICE)
-            self.tgt = tgt[:, :-1]    # Decoder输入部分 (BOS到tokenN-1)
-            self.tgt_y = tgt[:, 1:]   # Decoder监督目标 (token1到EOS)
-            self.tgt_mask = Batch.make_std_mask(self.tgt, pad)
-            self.ntokens = (self.tgt_y != pad).data.sum()  # 有效token数，用于loss归一化
+            self.tgt = tgt[:, :-1]     # Decoder 输入
+            self.tgt_y = tgt[:, 1:]    # Decoder 监督目标
+            self.tgt_key_padding_mask, self.tgt_mask = Batch.make_tgt_mask(self.tgt, pad)
+            self.ntokens = (self.tgt_y != pad).data.sum()  # 有效 token 数量
+
 
 class MTDataset(Dataset):
     """
