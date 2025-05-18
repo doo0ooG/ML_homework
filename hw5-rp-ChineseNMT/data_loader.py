@@ -12,22 +12,18 @@ DEVICE = config.device
 
 class Batch:
     @staticmethod
-    def subsequent_mask(size):
-        """
-        生成下三角 mask: (size, size)
-        """
-        return torch.tril(torch.ones((size, size), dtype=torch.bool))
-
-    @staticmethod
     def make_tgt_mask(tgt, pad):
         """
         返回：
-        - tgt_key_padding_mask: [batch_size, tgt_len]
-        - tgt_mask: [tgt_len, tgt_len]
+        - tgt_key_padding_mask: [batch_size, tgt_len]，True 表示被 mask
+        - tgt_mask: [tgt_len, tgt_len]，float 类型，下三角，masked 为 -inf
         """
-        tgt_key_padding_mask = (tgt == pad)  # True 表示被 mask 掉
+        tgt_key_padding_mask = (tgt == pad)  # [batch_size, tgt_len]
+
         tgt_len = tgt.size(1)
-        tgt_mask = Batch.subsequent_mask(tgt_len).to(tgt.device)  # [tgt_len, tgt_len]
+        mask = torch.tril(torch.ones((tgt_len, tgt_len), device=tgt.device)).bool()
+        tgt_mask = mask.masked_fill(~mask, float('-inf')).masked_fill(mask, float(0.0))  # [tgt_len, tgt_len]
+
         return tgt_key_padding_mask, tgt_mask
 
     def __init__(self, src_text, tgt_text, src, tgt=None, pad=0):
@@ -40,9 +36,10 @@ class Batch:
         if tgt is not None:
             tgt = tgt.to(DEVICE)
             self.tgt = tgt[:, :-1]     # Decoder 输入
-            self.tgt_y = tgt[:, 1:]    # Decoder 监督目标
+            self.tgt_y = tgt[:, 1:]    # Decoder 输出目标
             self.tgt_key_padding_mask, self.tgt_mask = Batch.make_tgt_mask(self.tgt, pad)
-            self.ntokens = (self.tgt_y != pad).data.sum()  # 有效 token 数量
+            self.ntokens = (self.tgt_y != pad).data.sum()
+
 
 
 class MTDataset(Dataset):

@@ -5,6 +5,7 @@ import torch
 from data_loader import Batch
 import sentencepiece as spm
 import sacrebleu
+from torch.nn.utils import clip_grad_norm_
 
 sp_chn = spm.SentencePieceProcessor()
 sp_chn.Load(config.chn_tokenizer)
@@ -19,11 +20,7 @@ def run_epoch(dataloader, model, criterion, optimizer = None):
                        tgt_mask = batch.tgt_mask,
                        src_key_padding_mask = batch.src_key_padding_mask,
                        tgt_key_padding_mask = batch.tgt_key_padding_mask)
-        
-        # logging.info(output.shape)
-        # logging.info(output.reshape(-1, output.size(-1)).shape)
-        # logging.info(batch.tgt_y.reshape(-1).shape)
-        # assert 1 == 2
+
         loss = criterion(output.reshape(-1, output.size(-1)), batch.tgt_y.reshape(-1))
         total_loss += loss.item()
         total_tokens += batch.ntokens.item() 
@@ -31,7 +28,9 @@ def run_epoch(dataloader, model, criterion, optimizer = None):
         if optimizer is not None:
             optimizer.zero_grad()
             loss.backward()
+            clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+
 
     return total_loss / total_tokens
 
@@ -51,20 +50,22 @@ def train(train_dataloader, val_dataloader, model, criterion, optimizer):
             val_loss = run_epoch(val_dataloader, model, criterion)
         logging.info(f"Epoch {epoch}, val loss: {val_loss:.4f}")
         
-        bleu = compute_bleu_score(model, val_dataloader)
-        logging.info(f"Epoch {epoch}, bleu score: {bleu:.4f}")
+        torch.save(model.state_dict(), config.model_save_path)
 
-        if bleu > best_bleu:
-            best_bleu = bleu
-            early_stop_counter = 0
-            torch.save(model.state_dict(), config.model_save_path)
-            logging.info(f"Epoch {epoch}, new Best BLEU: {bleu:.4f}, save best model -------------")
-        else:
-            early_stop_counter += 1
+        # bleu = compute_bleu_score(model, val_dataloader)
+        # logging.info(f"Epoch {epoch}, bleu score: {bleu:.4f}")
 
-        if early_stop_counter >= config.early_stop:
-            logging.info("Early stopping triggered!")
-            break
+        # if bleu > best_bleu:
+        #     best_bleu = bleu
+        #     early_stop_counter = 0
+        #     torch.save(model.state_dict(), config.model_save_path)
+        #     logging.info(f"Epoch {epoch}, new Best BLEU: {bleu:.4f}, save best model -------------")
+        # else:
+        #     early_stop_counter += 1
+
+        # if early_stop_counter >= config.early_stop:
+        #     logging.info("Early stopping triggered!")
+        #     break
 
 def test(test_dataloader, model, criterion):
     model.load_state_dict(torch.load(config.model_save_path))
@@ -81,12 +82,7 @@ def compute_bleu_score(model, dataloader):
     total_refs = []
     total_hyps = []
 
-    # 只取前 5% 的 batch
-    dataloader_list = list(dataloader)
-    num_batches = max(1, int(len(dataloader_list) * config.compute_bleu_data_ratio))
-    limited_batches = dataloader_list[:num_batches]
-
-    for batch in tqdm(limited_batches, desc=f"Computing BLEU ({config.compute_bleu_data_ratio * 100}%)"):
+    for batch in tqdm(dataloader):
         output = greedy_decode(model, 
                                batch.src, 
                                batch.src_key_padding_mask, 
@@ -122,7 +118,7 @@ def greedy_decode(model, src, src_key_padding_mask, max_len = 60, start_symbol =
     # assert 1 == 2
 
     for i in range(max_len - 1):
-        tgt_mask = Batch.subsequent_mask(ys.size(1)).to(src.device)
+        tgt_mask = generate_subsequent_mask(ys.size(1)).to(src.device)
         out = model.transformer.decoder(
             model.pos_embed(model.tgt_embed(ys)),
             memory,
@@ -135,3 +131,11 @@ def greedy_decode(model, src, src_key_padding_mask, max_len = 60, start_symbol =
         ys = torch.cat([ys, next_word], dim = 1)
         # logging.info(ys.shape)
     return ys
+
+def generate_subsequent_mask(size, device=None):
+    """
+    生成 Transformer 解码器用的下三角 mask。
+    输出为 float tensor，masked 为 -inf，保留为 0.0
+    """
+    mask = torch.tril(torch.ones(size, size, device=device)).bool()
+    return mask.masked_fill(~mask, float('-inf')).masked_fill(mask, float(0.0))
