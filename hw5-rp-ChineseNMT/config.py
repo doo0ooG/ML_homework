@@ -14,6 +14,11 @@ model_save_path = './experiment/model.pth' # 模型位置
 import torch
 device = 'cuda' if torch.cuda.is_available() else 'cpu' # 计算设备
 
+# 常量
+padding_idx = 0
+bos_idx = 2
+eos_idx = 3
+
 # 超参数
 batch_size = 32
 d_model = 512
@@ -21,10 +26,8 @@ nhead = 8
 num_encoder_layers = 6
 num_decoder_layers = 6
 dim_feedforward = 2048
-dropout = 0.1
-padding_idx = 0
-bos_idx = 2
-eos_idx = 3
+dropout = 0.2
+
 src_vocab_size = 32000
 tgt_vocab_size = 32000
 epoch = 20

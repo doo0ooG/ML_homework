@@ -27,16 +27,9 @@ def run():
     test_dataset = MTDataset(config.test_data_path)
     
     logging.info("-------- Dataset Build! --------")
-    # train_dataloader = DataLoader(train_dataset, shuffle=True, batch_size=config.batch_size,
-    #                               collate_fn=train_dataset.collate_fn)
-    # dev_dataloader = DataLoader(dev_dataset, shuffle=False, batch_size=config.batch_size,
-    #                             collate_fn=dev_dataset.collate_fn)
-    # test_dataloader = DataLoader(test_dataset, shuffle=False, batch_size=config.batch_size,
-    #                              collate_fn=test_dataset.collate_fn)
-
     train_dataloader = get_partial_loader(train_dataset, ratio=0.1, shuffle=True, batch_size=config.batch_size, collate_fn=train_dataset.collate_fn)
     dev_dataloader   = get_partial_loader(dev_dataset,   ratio=0.1, shuffle=True, batch_size=config.batch_size, collate_fn=dev_dataset.collate_fn)
-    test_dataloader  = get_partial_loader(test_dataset,  ratio=0.1, shuffle=True, batch_size=config.batch_size, collate_fn=test_dataset.collate_fn)
+    test_dataloader  = get_partial_loader(test_dataset,  ratio=1, shuffle=False, batch_size=config.batch_size, collate_fn=test_dataset.collate_fn)
 
     
     logging.info("-------- Get Dataloader! --------")

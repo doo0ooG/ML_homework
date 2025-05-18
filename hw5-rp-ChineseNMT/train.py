@@ -6,6 +6,10 @@ from data_loader import Batch
 import sentencepiece as spm
 import sacrebleu
 from torch.nn.utils import clip_grad_norm_
+from torch.cuda.amp import autocast, GradScaler
+import math
+
+scaler = GradScaler()
 
 sp_chn = spm.SentencePieceProcessor()
 sp_chn.Load(config.chn_tokenizer)
@@ -15,22 +19,26 @@ def run_epoch(dataloader, model, criterion, optimizer = None):
     total_tokens = 0
 
     for batch in tqdm(dataloader):
-        output = model(src = batch.src,
-                       tgt = batch.tgt,
-                       tgt_mask = batch.tgt_mask,
-                       src_key_padding_mask = batch.src_key_padding_mask,
-                       tgt_key_padding_mask = batch.tgt_key_padding_mask)
+        with autocast(enabled = True):
+            output = model(src = batch.src,
+                        tgt = batch.tgt,
+                        tgt_mask = batch.tgt_mask,
+                        src_key_padding_mask = batch.src_key_padding_mask,
+                        tgt_key_padding_mask = batch.tgt_key_padding_mask)
 
-        loss = criterion(output.reshape(-1, output.size(-1)), batch.tgt_y.reshape(-1))
-        total_loss += loss.item()
-        total_tokens += batch.ntokens.item() 
+            loss = criterion(output.reshape(-1, output.size(-1)), batch.tgt_y.reshape(-1))
+        
 
         if optimizer is not None:
             optimizer.zero_grad()
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
+        total_loss += loss.item()
+        total_tokens += batch.ntokens.item() 
 
     return total_loss / total_tokens
 
@@ -49,23 +57,21 @@ def train(train_dataloader, val_dataloader, model, criterion, optimizer):
         with torch.no_grad():
             val_loss = run_epoch(val_dataloader, model, criterion)
         logging.info(f"Epoch {epoch}, val loss: {val_loss:.4f}")
-        
-        torch.save(model.state_dict(), config.model_save_path)
 
-        # bleu = compute_bleu_score(model, val_dataloader)
-        # logging.info(f"Epoch {epoch}, bleu score: {bleu:.4f}")
+        bleu = compute_bleu_score(model, val_dataloader)
+        logging.info(f"Epoch {epoch}, bleu score: {bleu:.4f}")
 
-        # if bleu > best_bleu:
-        #     best_bleu = bleu
-        #     early_stop_counter = 0
-        #     torch.save(model.state_dict(), config.model_save_path)
-        #     logging.info(f"Epoch {epoch}, new Best BLEU: {bleu:.4f}, save best model -------------")
-        # else:
-        #     early_stop_counter += 1
+        if bleu > best_bleu:
+            best_bleu = bleu
+            early_stop_counter = 0
+            torch.save(model.state_dict(), config.model_save_path)
+            logging.info(f"Epoch {epoch}, new Best BLEU: {bleu:.4f}, save best model -------------")
+        else:
+            early_stop_counter += 1
 
-        # if early_stop_counter >= config.early_stop:
-        #     logging.info("Early stopping triggered!")
-        #     break
+        if early_stop_counter >= config.early_stop:
+            logging.info("Early stopping triggered!")
+            break
 
 def test(test_dataloader, model, criterion):
     model.load_state_dict(torch.load(config.model_save_path))
@@ -77,65 +83,63 @@ def test(test_dataloader, model, criterion):
         bleu = compute_bleu_score(model, test_dataloader)
         logging.info(f"Test BLEU: {bleu:.4f}")
 
-def compute_bleu_score(model, dataloader):
+def compute_bleu_score(model, dataloader, sp_chn, bos_idx=2, eos_idx=3):
+    from sacrebleu.metrics import BLEU
+    bleu = BLEU()
+    all_references = []
+    all_hypotheses = []
+
+    for batch in dataloader:
+        src = batch.src
+        src_key_padding_mask = batch.src_key_padding_mask
+
+        preds = greedy_decode(model, src, src_key_padding_mask, bos_idx, eos_idx)
+
+        for pred_tokens, ref_text in zip(preds, batch.tgt_text):
+            # 处理预测
+            pred_tokens = pred_tokens.tolist()
+            if eos_idx in pred_tokens:
+                pred_tokens = pred_tokens[:pred_tokens.index(eos_idx)]
+            pred_sentence = sp_chn.decode_ids(pred_tokens)
+
+            # 处理参考答案（batch.tgt_text 是 token id 列表）
+            ref_tokens = [tok for tok in ref_text if tok != 0 and tok != bos_idx and tok != eos_idx]
+            ref_sentence = sp_chn.decode_ids(ref_tokens)
+
+            all_hypotheses.append(pred_sentence)
+            all_references.append([ref_sentence])  # 注意嵌套一层列表是 sacrebleu 格式
+
+    return bleu.corpus_score(all_hypotheses, all_references).score
+
+
+
+def greedy_decode(model, src, src_key_padding_mask, bos_idx, eos_idx, max_len=100):
     model.eval()
-    total_refs = []
-    total_hyps = []
+    with torch.no_grad():
+        src_embed = model.src_embed(src) * math.sqrt(model.transformer.d_model)
+        src_embed = model.pos_embed(src_embed)
+        memory = model.transformer.encoder(src_embed, src_key_padding_mask=src_key_padding_mask)
 
-    for batch in tqdm(dataloader):
-        output = greedy_decode(model, 
-                               batch.src, 
-                               batch.src_key_padding_mask, 
-                               max_len=config.max_len, 
-                               start_symbol=config.bos_idx)
+        ys = torch.full((src.size(0), 1), bos_idx, dtype=torch.long, device=src.device)
 
-        for pred_tokens, tgt_tokens in zip(output.tolist(), batch.tgt_y.tolist()):
-            pred_ids = [id for id in pred_tokens if id != config.padding_idx and id != config.eos_idx]
-            tgt_ids = [id for id in tgt_tokens if id != config.padding_idx and id != config.eos_idx]
-            if config.eos_idx in pred_ids:
-                pred_ids = pred_ids[:pred_ids.index(config.eos_idx)]
+        for _ in range(max_len):
+            tgt_embed = model.tgt_embed(ys) * math.sqrt(model.transformer.d_model)
+            tgt_embed = model.pos_embed(tgt_embed)
 
-            pred_text = sp_chn.decode_ids(pred_ids)
-            ref_text = sp_chn.decode_ids(tgt_ids)
+            tgt_len = ys.size(1)
+            tgt_mask = torch.tril(torch.ones((tgt_len, tgt_len), device=src.device)).masked_fill(0 == 0, float('-inf'))
+            tgt_mask = tgt_mask.masked_fill(torch.tril(torch.ones((tgt_len, tgt_len), device=src.device)) == 1, float(0.0))
 
-            # logging.info(pred_text)
-            # logging.info(ref_text)
-            # assert 1 == 2
+            out = model.transformer.decoder(
+                tgt_embed, memory,
+                tgt_mask=tgt_mask,
+                memory_key_padding_mask=src_key_padding_mask
+            )
+            logits = model.generator(out[:, -1])  # [B, vocab_size]
+            next_token = torch.argmax(logits, dim=-1).unsqueeze(1)  # [B, 1]
+            ys = torch.cat([ys, next_token], dim=1)
 
-            total_hyps.append(pred_text)
-            total_refs.append([ref_text])
+            if (next_token == eos_idx).all():
+                break
 
-    bleu = sacrebleu.corpus_bleu(total_hyps, total_refs)
-    return bleu.score
-
-
-def greedy_decode(model, src, src_key_padding_mask, max_len = 60, start_symbol = 2):
-    memory = model.transformer.encoder(model.pos_embed(model.src_embed(src)), 
-                                       src_key_padding_mask = src_key_padding_mask)
-    ys = torch.ones(src.size(0), 1).fill_(start_symbol).long().to(src.device)
-    # logging.info(ys.shape)
-    # logging.info(ys)
-    # assert 1 == 2
-
-    for i in range(max_len - 1):
-        tgt_mask = generate_subsequent_mask(ys.size(1)).to(src.device)
-        out = model.transformer.decoder(
-            model.pos_embed(model.tgt_embed(ys)),
-            memory,
-            tgt_mask = tgt_mask,
-            memory_key_padding_mask = src_key_padding_mask
-        )
-
-        out = model.generator(out[:, -1])
-        next_word = torch.argmax(out, dim = -1).unsqueeze(1)
-        ys = torch.cat([ys, next_word], dim = 1)
-        # logging.info(ys.shape)
-    return ys
-
-def generate_subsequent_mask(size, device=None):
-    """
-    生成 Transformer 解码器用的下三角 mask。
-    输出为 float tensor，masked 为 -inf，保留为 0.0
-    """
-    mask = torch.tril(torch.ones(size, size, device=device)).bool()
-    return mask.masked_fill(~mask, float('-inf')).masked_fill(mask, float(0.0))
+        return ys[:, 1:]  # 去掉 <bos>
